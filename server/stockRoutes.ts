@@ -1,0 +1,997 @@
+import { Router } from 'express';
+import YahooFinance from 'yahoo-finance2';
+const yahooFinance = new YahooFinance({ 
+  suppressNotices: ['yahooSurvey'],
+  validation: { logErrors: false } 
+});
+import { monitor } from './dataSourceHealth.js';
+import { logDebug, logError } from './stockLogger.js';
+import { calcIndicators } from './indicators/technicalCalc.js';
+import { calculateVolatility, calculateVolatilityAdjustedLimit } from './indicators/riskMetrics.js';
+import { calculateFundamentalScores, calculateIntrinsicValueEstimate } from './indicators/fundamentalScoring.js';
+
+// [FIX]: Managed via hardened Sina fallback in stockRoutes.ts
+const router = Router();
+
+// --- Simple InMemory Cache ---
+const apiCache = new Map<string, { data: any, timestamp: number }>();
+const CACHE_TTL = 5 * 60 * 1000; // 5 minutes
+
+function getCached(key: string) {
+  const item = apiCache.get(key);
+  if (item && Date.now() - item.timestamp < CACHE_TTL) return item.data;
+  return null;
+}
+function setCache(key: string, data: any) {
+  apiCache.set(key, { data, timestamp: Date.now() });
+}
+
+async function fetchJsonWithTimeout(url: string, timeoutMs = 8000, retries = 2): Promise<any> {
+  const controller = new AbortController();
+  const timer = setTimeout(() => controller.abort(), timeoutMs);
+  try {
+    const response = await fetch(url, { 
+      signal: controller.signal,
+      headers: {
+        'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
+        'Accept': 'application/json, text/plain, */*',
+        'Accept-Language': 'zh-CN,zh;q=0.9,en;q=0.8'
+      }
+    });
+    if (!response.ok) {
+      throw new Error(`HTTP ${response.status} for ${url}`);
+    }
+    return await response.json();
+  } catch (error: any) {
+    if (error.name !== 'AbortError') {
+      console.warn(`[fetchJsonWithTimeout] Error fetching ${url}:`, error.message);
+      if (retries > 0) {
+        console.log(`[fetchJsonWithTimeout] Retrying ${url}... (${retries} left)`);
+        await new Promise(resolve => setTimeout(resolve, 1000));
+        return fetchJsonWithTimeout(url, timeoutMs, retries - 1);
+      }
+    }
+    throw error;
+  } finally {
+    clearTimeout(timer);
+  }
+}
+
+async function fetchAShareSpotFallbackFromSina(symbol: string): Promise<any | null> {
+  const sinaCode = symbol.startsWith('6') ? `sh${symbol}` : `sz${symbol}`;
+  const url = `https://hq.sinajs.cn/list=${sinaCode}`;
+  const response = await fetch(url, {
+    headers: { Referer: 'https://finance.sina.com.cn' }
+  });
+  const text = await response.text();
+  const match = text.match(/="([^"]*)"/);
+  if (!match?.[1]) return null;
+
+  const parts = match[1].split(',');
+  if (parts.length < 10) return null;
+
+  const name = parts[0] || symbol;
+  const open = Number(parts[1]);
+  const prevClose = Number(parts[2]);
+  const price = Number(parts[3]);
+  const high = Number(parts[4]);
+  const low = Number(parts[5]);
+  const volume = Number(parts[8]);
+
+  if (!Number.isFinite(price)) return null;
+
+  const change = Number.isFinite(prevClose) ? (price - prevClose) : 0;
+  const changePercent = Number.isFinite(prevClose) && prevClose !== 0 ? (change / prevClose) * 100 : 0;
+
+  return {
+    symbol,
+    shortName: name,
+    regularMarketPrice: price,
+    regularMarketChange: change,
+    regularMarketChangePercent: changePercent,
+    regularMarketPreviousClose: Number.isFinite(prevClose) ? prevClose : undefined,
+    regularMarketOpen: Number.isFinite(open) ? open : undefined,
+    regularMarketDayHigh: Number.isFinite(high) ? high : undefined,
+    regularMarketDayLow: Number.isFinite(low) ? low : undefined,
+    regularMarketVolume: Number.isFinite(volume) ? volume : undefined,
+    currency: 'CNY',
+    fullExchangeName: 'CN',
+    marketState: 'REGULAR',
+    source: 'Sina Finance (Fallback)',
+  };
+}
+
+async function fetchHKSpotFallbackFromSina(symbol: string): Promise<any | null> {
+  // Sina HK codes are usually 'hk' + 5 digits (e.g., hk00700)
+  const sinaCode = `hk${symbol.padStart(5, '0')}`;
+  const url = `https://hq.sinajs.cn/list=${sinaCode}`;
+  
+  try {
+    const response = await fetch(url, {
+      headers: { Referer: 'https://finance.sina.com.cn' }
+    });
+    const text = await response.text();
+    const match = text.match(/="([^"]*)"/);
+    if (!match?.[1]) return null;
+
+    const parts = match[1].split(',');
+    if (parts.length < 10) return null;
+
+    // Sina HK parts: 0=EngName, 1=ChiName, 2=Open, 3=PrevClose, 4=High, 5=Low, 6=Last, 7=Change, 8=Change%, 9=Buy, 10=Sell, 11=Volume, ...
+    const name = parts[1] || symbol;
+    
+    // [HARDENING]: Check index 6 (last price) and fallback to index 3 (prev close) or index 2 (open)
+    let price = Number(parts[6]);
+    const prevClose = Number(parts[3]);
+    const open = Number(parts[2]);
+    const high = Number(parts[4]);
+    const low = Number(parts[5]);
+    const volume = Number(parts[12]);
+    
+    if ((!price || price === 0) && prevClose > 0) price = prevClose;
+    if ((!price || price === 0) && open > 0) price = open;
+
+    if (!Number.isFinite(price) || price === 0) return null;
+
+    const change = Number(parts[7]);
+    const changePercent = Number(parts[8]);
+
+    return {
+      symbol,
+      shortName: name,
+      regularMarketPrice: price,
+      regularMarketChange: change,
+      regularMarketChangePercent: changePercent,
+      regularMarketPreviousClose: prevClose,
+      regularMarketOpen: Number(parts[2]),
+      regularMarketDayHigh: high,
+      regularMarketDayLow: low,
+      regularMarketVolume: volume,
+      currency: 'HKD',
+      fullExchangeName: 'HK',
+      marketState: 'REGULAR',
+      source: 'Sina Finance HK (Fallback)',
+    };
+  } catch (e) {
+    console.warn(`[SinaHKFallback] Failed for ${symbol}:`, e);
+    return null;
+  }
+}
+
+async function fetchSectorFlowFromEastMoneyFallback(): Promise<{ topInflows: any[]; topOutflows: any[] } | null> {
+  const url = 'https://push2.eastmoney.com/api/qt/clist/get?pn=1&pz=10&po=1&np=1&ut=b2884a393a59ad64002292a3e90d46a5&fltt=2&invt=2&fid=f62&fs=m:90+t:2&fields=f12,f14,f2,f3,f62,f184';
+  const data = await fetchJsonWithTimeout(url, 12000);
+  const diff = data?.data?.diff;
+  if (!Array.isArray(diff) || diff.length === 0) return null;
+
+  const items = diff.map((item: any) => ({
+    行业: item.f14,
+    最新价: item.f2,
+    涨跌幅: item.f3,
+    '主力净流入-净额': item.f62,
+    '主力净流入-净占比': item.f184,
+  }));
+
+  const sorted = items.sort((a: any, b: any) => (Number(b['主力净流入-净额']) || 0) - (Number(a['主力净流入-净额']) || 0));
+  return {
+    topInflows: sorted.slice(0, 5),
+    topOutflows: sorted.slice(-3).reverse(),
+  };
+}
+
+async function fetchNorthboundFromEastMoneyFallback(): Promise<any[] | null> {
+  const url = 'https://push2.eastmoney.com/api/qt/kamt.rtmin/get?fields1=f1,f2,f3,f4&fields2=f51,f52,f54,f58,f56&ut=b2884a393a59ad64002292a3e90d46a5';
+  const data = await fetchJsonWithTimeout(url, 20000);
+  const s2n = data?.data?.s2n;
+  if (!Array.isArray(s2n) || s2n.length === 0) return null;
+
+  const latest = String(s2n[s2n.length - 1] || '');
+  const parts = latest.split(',');
+  if (parts.length < 3) return null;
+
+  const sh = Number(parts[1]) || 0;
+  const sz = Number(parts[2]) || 0;
+  return [{
+    时间: parts[0] || '',
+    沪股通净流入: sh,
+    深股通净流入: sz,
+    北向资金净流入: sh + sz,
+  }];
+}
+// -----------------------------
+
+// Market Indices
+router.get('/stock/indices', async (req, res) => {
+  const { market } = req.query;
+
+  const indexSymbols: Record<string, { symbol: string; name: string }[]> = {
+    'A-Share': [
+      { symbol: '000001.SS', name: '上证综指' },
+      { symbol: '399001.SZ', name: '深证成指' },
+      { symbol: '399006.SZ', name: '创业板指' },
+      { symbol: '000300.SS', name: '沪深300' },
+      { symbol: '^HSI', name: '恒生指数' },
+    ],
+    'HK-Share': [
+      { symbol: '^HSI', name: '恒生指数' },
+      { symbol: '^HSTECH', name: '恒生科技指数' },
+      { symbol: '^HSCE', name: '国企指数' },
+      { symbol: '^HSCCI', name: '红筹指数' },
+      { symbol: '^S&P/HKEX GEM', name: '创业板指数' },
+    ],
+    'US-Share': [
+      { symbol: '^GSPC', name: 'S&P 500' },
+      { symbol: '^IXIC', name: '纳斯达克综合' },
+      { symbol: '^DJI', name: '道琼斯工业' },
+      { symbol: '^RUT', name: '罗素2000' },
+      { symbol: '^SOX', name: '费城半导体' },
+    ],
+  };
+
+  const marketKey = (market as string) || 'A-Share';
+  const validMarkets = ['A-Share', 'HK-Share', 'US-Share'];
+  const symbols = indexSymbols[validMarkets.includes(marketKey) ? marketKey : 'A-Share'];
+
+  const cacheKey = `indices_${marketKey}`;
+  const cached = getCached(cacheKey);
+  if (cached) return res.json(cached);
+
+  try {
+    const startTime = Date.now();
+    // Use parallel fetching to avoid long sequential waits
+    const results = await Promise.all(symbols.map(async (idx) => {
+      try {
+        const quote = await yahooFinance.quote(idx.symbol as any) as any;
+        if (quote) {
+          const price = quote.regularMarketPrice;
+          const prevClose = quote.regularMarketPreviousClose;
+          let change = quote.regularMarketChange;
+          let changePercent = quote.regularMarketChangePercent;
+
+          if (change === undefined && price !== undefined && prevClose !== undefined) {
+            change = price - prevClose;
+          }
+          if (changePercent === undefined && change !== undefined && prevClose !== undefined && prevClose !== 0) {
+            changePercent = (change / prevClose) * 100;
+          }
+
+          const marketTime = quote.regularMarketTime ? new Date(quote.regularMarketTime) : new Date();
+          const formattedTime = marketTime.toLocaleString('zh-CN', {
+            timeZone: 'Asia/Shanghai',
+            year: 'numeric', month: '2-digit', day: '2-digit',
+            hour: '2-digit', minute: '2-digit', second: '2-digit'
+          });
+
+          return {
+            name: idx.name,
+            symbol: idx.symbol,
+            price,
+            change: change !== undefined ? parseFloat(change.toFixed(2)) : 0,
+            changePercent: changePercent !== undefined ? parseFloat(changePercent.toFixed(2)) : 0,
+            previousClose: prevClose,
+            lastUpdated: formattedTime + ' CST',
+            source: 'Yahoo Finance API',
+            marketState: quote.marketState,
+          };
+        }
+      } catch (e) {
+        logDebug(`Yahoo Index Fetch`, `Failed for ${idx.symbol}: ${e instanceof Error ? e.message : String(e)}`);
+      }
+      return null;
+    }));
+
+    let filteredResults = results.filter(r => r !== null);
+
+    // Fallback for A-Share if Yahoo returned too few results
+    if (marketKey === 'A-Share' && filteredResults.length < 3) {
+      logDebug(`A-Share Fallback`, `Yahoo results too low (${filteredResults.length}), triggering Sina fallback...`);
+      try {
+        const sinaIndices = [
+          { s: 's_sh000001', name: '上证综指', sym: '000001.SS' },
+          { s: 's_sz399001', name: '深证成指', sym: '399001.SZ' },
+          { s: 's_sz399006', name: '创业板指', sym: '399006.SZ' },
+          { s: 's_sh000300', name: '沪深300', sym: '000300.SS' }
+        ];
+        
+        const sinaUrl = `https://hq.sinajs.cn/list=${sinaIndices.map(i => i.s).join(',')}`;
+        const response = await fetch(sinaUrl, { headers: { 'Referer': 'https://finance.sina.com.cn' } });
+        const text = await response.text();
+        
+        sinaIndices.forEach(idx => {
+          const match = text.match(new RegExp(`hq_str_${idx.s}="([^"]+)"`));
+          if (match?.[1]) {
+            const parts = match[1].split(',');
+            if (parts.length >= 4) {
+              const price = parseFloat(parts[1]);
+              const change = parseFloat(parts[2]);
+              const changePercent = parseFloat(parts[3]);
+              
+              // Only add if not already present from Yahoo
+              if (!filteredResults.find(r => r.symbol === idx.sym)) {
+                filteredResults.push({
+                  name: idx.name,
+                  symbol: idx.sym,
+                  price,
+                  change: parseFloat(change.toFixed(2)),
+                  changePercent: parseFloat(changePercent.toFixed(2)),
+                  previousClose: parseFloat((price - change).toFixed(2)),
+                  lastUpdated: new Date().toLocaleString('zh-CN', { timeZone: 'Asia/Shanghai' }) + ' CST',
+                  source: 'Sina Finance (Fallback)',
+                  marketState: 'REGULAR'
+                });
+              }
+            }
+          }
+        });
+      } catch (sinaErr) {
+        logError(sinaErr, `Sina Fallback failed`);
+      }
+    }
+
+    monitor.recordSuccess('yahoo', Date.now() - startTime);
+    setCache(cacheKey, filteredResults);
+    res.json(filteredResults);
+  } catch (error) {
+    monitor.recordFailure('yahoo');
+    console.error('Indices fetch error:', error);
+    res.status(500).json({ error: 'Failed to fetch indices data' });
+  }
+});
+
+// Commodities
+router.get('/stock/commodities', async (req, res) => {
+  const commoditySymbols = [
+    { symbol: 'GC=F', name: '伦敦金 (XAU)', unit: '$/oz' },
+    { symbol: 'CL=F', name: '原油 (WTI)', unit: '$/bbl' },
+    { symbol: 'USDCNY=X', name: '美元/人民币', unit: 'CNY' },
+    { symbol: '^VIX', name: 'VIX 恐慌指数', unit: 'pts' },
+    { symbol: '^TNX', name: '10年美债收益率', unit: '%' },
+  ];
+
+  const cacheKey = 'commodities';
+  const cached = getCached(cacheKey);
+  if (cached) return res.json(cached);
+
+  try {
+    // Parallel fetch — ~5x faster than sequential for..of loop
+    const results = (await Promise.all(commoditySymbols.map(async (item) => {
+      try {
+        const quote = await yahooFinance.quote(item.symbol) as any;
+        if (quote) {
+          return {
+            name: item.name,
+            symbol: item.symbol,
+            price: quote.regularMarketPrice,
+            changePercent: quote.regularMarketChangePercent !== undefined ? parseFloat(quote.regularMarketChangePercent.toFixed(2)) : 0,
+            unit: item.unit,
+            source: 'Yahoo Finance API',
+            lastUpdated: new Date().toLocaleString('zh-CN', { timeZone: 'Asia/Shanghai' }) + ' CST'
+          };
+        }
+      } catch (e) {
+        console.warn(`Failed to fetch commodity ${item.symbol}:`, e instanceof Error ? e.message : String(e));
+      }
+      return null;
+    }))).filter(r => r !== null);
+    setCache(cacheKey, results);
+    res.json(results);
+  } catch (error) {
+    console.error('Commodities fetch error:', error);
+    res.status(500).json({ error: 'Failed to fetch commodities data' });
+  }
+});
+
+// Financial News (Backend deterministic fetch to save AI tokens)
+router.get('/stock/news', async (req, res) => {
+  const { market, symbol } = req.query;
+  const marketKey = (market as string) || 'A-Share';
+  const symbolKey = symbol ? (symbol as string).toUpperCase() : null;
+  const cacheKey = symbolKey ? `news_${marketKey}_${symbolKey}` : `news_${marketKey}`;
+  
+  const cached = getCached(cacheKey);
+  if (cached) return res.json(cached);
+
+  try {
+    const news: any[] = [];
+    
+    // 0. Ticker-specific search (Priority if symbol exists)
+    if (symbolKey) {
+      try {
+        const yfSym = appendMarketSuffix(symbolKey, marketKey);
+        const searchResult = await yahooFinance.search(yfSym, { newsCount: 8 });
+        if (searchResult?.news && searchResult.news.length > 0) {
+          searchResult.news.forEach((n: any) => {
+            news.push({
+              title: n.title,
+              url: n.link,
+              time: new Date(n.providerPublishTime).toLocaleString('zh-CN', { timeZone: 'Asia/Shanghai' }),
+              source: n.publisher || 'Yahoo Finance'
+            });
+          });
+        }
+      } catch (e) {
+        logError(e, `Ticker News Fetch Failed for ${symbolKey}`);
+      }
+    }
+
+    // 1. Primary Top-Tier Fetch via Sina RSS (if A-share/HK-share)
+    if (news.length < 5 && (marketKey === 'A-Share' || marketKey === 'HK-Share')) {
+      try {
+        const sinaUrl = 'https://finance.sina.com.cn/rss/roll.xml';
+        const response = await fetch(sinaUrl, {
+          headers: { 'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64)' }
+        });
+        const text = await response.text();
+        
+        // Flexible regex for RSS items, handling both CDATA and plain text titles
+        const itemRegex = /<item>[\s\S]*?<title>(?:<!\[CDATA\[)?(.*?)(?:\]\]>)?<\/title>[\s\S]*?<link>(.*?)<\/link>[\s\S]*?<pubDate>(.*?)<\/pubDate>[\s\S]*?<\/item>/g;
+        let match;
+        let count = 0;
+        
+        while ((match = itemRegex.exec(text)) !== null && count < (8 - news.length)) {
+          news.push({
+            title: match[1].replace(/<!\[CDATA\[|\]\]>/g, '').trim(),
+            url: match[2].trim(),
+            time: new Date(match[3]).toLocaleString('zh-CN', { timeZone: 'Asia/Shanghai' }),
+            source: 'Sina Finance'
+          });
+          count++;
+        }
+      } catch (e) {
+        logError(e, 'Sina News Fetch Failed');
+      }
+    }
+
+    // Always fetch some global Yahoo news (Guaranteed Fallback)
+    if (news.length < 5 || marketKey === 'US-Share') {
+      try {
+        const query = marketKey === 'A-Share' ? '000001.SS' : marketKey === 'HK-Share' ? '0700.HK' : 'SPY';
+        const query2 = marketKey === 'A-Share' ? 'BABA' : marketKey === 'HK-Share' ? 'BABA' : 'QQQ';
+        
+        const [yahooNews1, yahooNews2] = await Promise.all([
+          yahooFinance.search(query, { newsCount: 4 }),
+          yahooFinance.search(query2, { newsCount: 4 })
+        ]);
+        
+        const combinedNews = [...(yahooNews1?.news || []), ...(yahooNews2?.news || [])];
+        
+        if (combinedNews.length > 0) {
+          combinedNews.forEach((n: any) => {
+            news.push({
+              title: n.title,
+              url: n.link,
+              time: new Date(n.providerPublishTime).toLocaleString('zh-CN', { timeZone: 'Asia/Shanghai' }),
+              source: n.publisher || 'Yahoo Finance'
+            });
+          });
+        }
+      } catch (e) {
+        logError(e, 'Yahoo News Fetch Failed');
+      }
+    }
+
+    // De-duplicate by title
+    const uniqueNews = Array.from(new Map(news.map(item => [item.title, item])).values()).slice(0, 8);
+    
+    setCache(cacheKey, uniqueNews);
+    res.json(uniqueNews);
+  } catch (error) {
+    console.error('News fetch error:', error);
+    res.status(500).json({ error: 'Failed to fetch news data' });
+  }
+});
+
+// Institutional Sector Flows
+router.get('/stock/sectors', async (req, res) => {
+  const cacheKey = 'sector_flow';
+  const cached = getCached(cacheKey);
+  if (cached) return res.json(cached);
+
+  try {
+    const fallback = await fetchSectorFlowFromEastMoneyFallback();
+    if (fallback) {
+      setCache(cacheKey, fallback);
+      return res.json(fallback);
+    }
+  } catch (error: any) {
+    if (error.name !== 'AbortError') {
+      console.warn(`Sector flow fetch error: ${error.message} (Skipped)`);
+    }
+  }
+  res.json({ topInflows: [], topOutflows: [] });
+});
+
+// Northbound Capital Flows
+router.get('/stock/northbound', async (req, res) => {
+  const cacheKey = 'northbound_flow';
+  const cached = getCached(cacheKey);
+  if (cached) return res.json(cached);
+
+  try {
+    const fallback = await fetchNorthboundFromEastMoneyFallback();
+    if (fallback) {
+      setCache(cacheKey, fallback);
+      return res.json(fallback);
+    }
+  } catch (error: any) {
+    if (error.name !== 'AbortError') {
+      console.warn(`Northbound flow fetch error: ${error.message} (Skipped)`);
+    }
+  }
+  res.json([]);
+});
+
+// LHB (Dragon-Tiger List)
+router.get('/stock/lhb', async (req, res) => {
+  const { symbol } = req.query;
+  if (!symbol) return res.json({ success: true, data: [] });
+  try {
+    const lhbUrl = `https://datacenter-web.eastmoney.com/api/data/v1/get?sortColumns=TRADE_DATE&sortTypes=-1&pageSize=10&pageNumber=1&reportName=RPT_DAILYBILLBOARD_DETAILS&columns=ALL&source=WEB&client=WEB&filter=(SECURITY_CODE="${symbol}")`;
+    const response = await fetchJsonWithTimeout(lhbUrl, 5000);
+    const result = response?.result?.data || [];
+    const normalized = result.map((item: any) => ({
+      date: item.TRADE_DATE?.split(' ')[0],
+      reason: item.EXPLAIN,
+      netBuy: item.BILLBOARD_NET_AMT,
+      buyTotal: item.BILLBOARD_BUY_AMT,
+      sellTotal: item.BILLBOARD_SELL_AMT,
+      closePrice: item.CLOSE_PRICE,
+      changeRate: item.CHANGE_RATE
+    }));
+    res.json({ success: true, data: normalized });
+  } catch (error) {
+    res.json({ success: true, data: [] });
+  }
+});
+
+// Margin trading
+router.get('/stock/margin', async (req, res) => {
+  res.json({ success: true, data: [] });
+});
+
+// Corporate Announcements
+router.get('/stock/announcements', async (req, res) => {
+  const { symbol } = req.query;
+  if (!symbol) return res.json({ success: true, data: [] });
+  try {
+    const annUrl = `https://np-anotice-stock.eastmoney.com/api/security/ann?sr=-1&page_size=10&page_index=1&ann_type=A&client_source=web&stock_list=${symbol}`;
+    const response = await fetchJsonWithTimeout(annUrl, 5000);
+    const result = response?.data?.list || [];
+    const normalized = result.map((item: any) => ({
+      title: item.title,
+      date: item.notice_date?.split(' ')[0],
+      url: `https://np-anotice-stock.eastmoney.com/api/security/ann?art_code=${item.art_code}`
+    }));
+    res.json({ success: true, data: normalized });
+  } catch (error) {
+    res.json({ success: true, data: [] });
+  }
+});
+
+// Social Trends
+router.get('/market/social-trends', async (req, res) => {
+  res.json({ success: true, data: { items: [], trendingTopics: [] } });
+});
+
+// Stock Suggestion / Autocomplete (Universal)
+router.get('/stock/suggest', async (req, res) => {
+  const { input, market: currentMarket } = req.query;
+  if (!input || typeof input !== 'string' || input.trim().length < 1) {
+    return res.json([]);
+  }
+
+  const suggestions: any[] = [];
+  const encodedInput = encodeURIComponent(input.trim());
+
+  try {
+    // 1. Try EastMoney Suggest API
+    try {
+      const emUrl = `https://suggest.eastmoney.com/suggest/default.aspx?name=cb&input=${encodedInput}`;
+      const controller = new AbortController();
+      const timer = setTimeout(() => controller.abort(), 4000);
+      try {
+        const emResponse = await fetch(emUrl, { signal: controller.signal });
+        const emText = await emResponse.text();
+        const emMatch = emText.match(/var cb\s*=\s*"(.*)"/);
+        if (emMatch?.[1]) {
+          const items = emMatch[1].split(';').filter(Boolean);
+          for (const item of items) {
+            const parts = item.split(',');
+            if (parts.length >= 5) {
+              const code = parts[1];
+              const emMarketType = parts[2];
+              const pinyin = parts[3];
+              const name = parts[4];
+              let marketId = '';
+              let exchange = '';
+              // Market type mapping: 1=SZ, 2=SH, 21=HK, 31=US
+              if (emMarketType === '1') { marketId = 'A-Share'; exchange = 'SZ'; }
+              else if (emMarketType === '2') { marketId = 'A-Share'; exchange = 'SH'; }
+              else if (emMarketType === '21') { marketId = 'HK-Share'; exchange = 'HK'; }
+              else if (emMarketType === '31') { marketId = 'US-Share'; exchange = 'US'; }
+              // Skip funds (11), indices (40), etc.
+              
+              if (marketId) {
+                suggestions.push({
+                  symbol: code,
+                  name: name,
+                  pinyin: pinyin,
+                  exchange: exchange,
+                  market: marketId,
+                  source: 'EastMoney'
+                });
+              }
+            }
+          }
+        }
+      } finally {
+        clearTimeout(timer);
+      }
+    } catch {}
+
+    // 2. Try Sina Suggest API
+    if (suggestions.length < 5) {
+      try {
+        const sinaUrl = `https://suggest3.sinajs.cn/suggest/type=&key=${encodedInput}`;
+        const controller = new AbortController();
+        const timer = setTimeout(() => controller.abort(), 4000);
+        try {
+          const sinaRes = await fetch(sinaUrl, { signal: controller.signal });
+          // Sina returns GBK-encoded text, decode properly
+          const sinaBuffer = await sinaRes.arrayBuffer();
+          const sinaText = new TextDecoder('gbk').decode(sinaBuffer);
+          const sinaMatch = sinaText.match(/="([^"]+)"/);
+          if (sinaMatch?.[1]) {
+            const parts = sinaMatch[1].split(';').filter(Boolean);
+            for (const part of parts) {
+              const details = part.split(',');
+              if (details.length >= 5) {
+                // Sina format: "sh600000,600000,600000,浦发银行,浦发银行" (approx)
+                // details[0] = sh600000, details[1] = 600000, details[2] = 600000, details[3] = 名称?, details[4] = 名称?
+                // Actual format depends on type. Let's fix the extraction:
+                const code = details[1]; // Corrected index
+                const name = details[4]; // Name seems to be at 4
+                let marketId = '';
+                let exchange = '';
+                // Derive market from composite code prefix (details[0])
+                const compositeCode = details[0];
+                const prefix = compositeCode.substring(0, 2).toLowerCase();
+                if (prefix === 'sh') { marketId = 'A-Share'; exchange = 'SH'; }
+                else if (prefix === 'sz') { marketId = 'A-Share'; exchange = 'SZ'; }
+                else if (prefix === 'hk') { marketId = 'HK-Share'; exchange = 'HK'; }
+                else if (prefix === 'us') { marketId = 'US-Share'; exchange = 'US'; }
+                
+                if (marketId && !suggestions.find(s => s.symbol === code)) {
+                  suggestions.push({ symbol: code, name, exchange, market: marketId, source: 'Sina' });
+                }
+              }
+            }
+          }
+        } finally {
+          clearTimeout(timer);
+        }
+      } catch (e) {
+        console.error('Sina suggestion error:', e);
+      }
+    }
+
+    // 3. Yahoo Search Fallback
+    if (suggestions.length === 0) {
+      try {
+        const yahooRes = await yahooFinance.search(input.trim());
+        if (yahooRes?.quotes) {
+          for (const q of yahooRes.quotes as any[]) {
+            const s = (q.symbol || '').toUpperCase();
+            let marketId = 'US-Share';
+            if (s.endsWith('.SS') || s.endsWith('.SZ') || s.endsWith('.BJ')) marketId = 'A-Share';
+            else if (s.endsWith('.HK')) marketId = 'HK-Share';
+            if (!suggestions.find(subs => subs.symbol === q.symbol)) {
+              suggestions.push({
+                symbol: q.symbol.split('.')[0],
+                fullSymbol: q.symbol,
+                name: q.shortname || q.longname || q.symbol,
+                exchange: q.exchange,
+                market: marketId,
+                source: 'Yahoo'
+              });
+            }
+            if (suggestions.length >= 8) break;
+          }
+        }
+      } catch {}
+    }
+
+    // Sort: Prioritize current market
+    const sorted = suggestions.sort((a, b) => {
+      if (a.market === currentMarket && b.market !== currentMarket) return -1;
+      if (a.market !== currentMarket && b.market === currentMarket) return 1;
+      return 0;
+    });
+
+    res.json(sorted.slice(0, 10));
+  } catch (error) {
+    console.error('Suggest API error:', error);
+    res.status(500).json({ error: 'Failed to fetch suggestions' });
+  }
+});
+
+// Real-time Stock Data (Universal)
+router.get('/stock/realtime', async (req, res) => {
+  const { symbol, market, symbols, debug } = req.query;
+  const isDebug = debug === 'true';
+
+  if (isDebug) logDebug('incoming_request', { symbol, market, symbols, path: '/stock/realtime' });
+
+  // Batch logic
+  if (symbols && typeof symbols === 'string' && symbols.trim()) {
+    try {
+      const rawSymbolList = symbols.split(',').map(s => s.trim()).filter(s => !!s).slice(0, 20); // Limit batch size
+      const symbolList = rawSymbolList.map(s => {
+        let sym = s.toUpperCase();
+        if (sym.endsWith('.SH')) sym = sym.replace('.SH', '.SS');
+        if (sym.length === 6) {
+          if (sym.startsWith('60') || sym.startsWith('68')) return `${sym}.SS`;
+          if (sym.startsWith('00') || sym.startsWith('30')) return `${sym}.SZ`;
+          if (sym.startsWith('8') || sym.startsWith('4')) return `${sym}.BJ`;
+        }
+        return sym;
+      });
+      const results = await yahooFinance.quote(symbolList as any) as any[];
+      return res.json(results.map(r => formatQuoteResult(r)));
+    } catch {
+      return res.status(500).json({ error: 'Failed' });
+    }
+  }
+
+  if (!symbol || typeof symbol !== 'string' || !symbol.trim()) {
+    return res.status(400).json({ error: 'Symbol is required' });
+  }
+
+  // Validate symbol format: alphanumeric, dots, hyphens, carets, slashes, equals (for Yahoo Finance symbols)
+  const symbolStr = (symbol as string).trim();
+  if (!/^[A-Za-z0-9.\-^/=]{1,20}$/.test(symbolStr)) {
+    return res.status(400).json({ error: 'Invalid symbol format' });
+  }
+
+  try {
+    const input = symbolStr;
+    // Step 1: Broad Resolution
+    const resolution = await resolveSymbolEx(input, market as string, isDebug);
+    
+    let result: any = null;
+    let indicators: any = null;
+    let source = 'Yahoo Finance API';
+
+    // A-Share: Try Sina API directly first for realtime spot
+    if (resolution.market === 'A-Share' && /^\d{6}$/.test(resolution.symbol)) {
+      try {
+        const fallbackSpot = await fetchAShareSpotFallbackFromSina(resolution.symbol).catch(() => null);
+        if (fallbackSpot) {
+          result = fallbackSpot;
+          source = fallbackSpot.source;
+        }
+      } catch (e) {
+        logDebug('Sina Spot Fetch failed', e instanceof Error ? e.message : String(e));
+      }
+    }
+
+    // HK-Share: Try Sina HK explicitly
+    if (!result && resolution.market === 'HK-Share' && /^\d{1,5}$/.test(resolution.symbol)) {
+      try {
+        const hkFallback = await fetchHKSpotFallbackFromSina(resolution.symbol);
+        if (hkFallback && hkFallback.regularMarketPrice > 0) {
+          result = hkFallback;
+          source = hkFallback.source;
+        }
+      } catch(e) {
+        logDebug('Sina HK Fetch failed', e instanceof Error ? e.message : String(e));
+      }
+    }
+
+    // Step 2: Fallback or Non-A-Share: Use Yahoo Finance
+    if (!result || result.regularMarketPrice === 0 || result.regularMarketPrice === undefined) {
+      const yahooResult = await tryQuoteEx(resolution.symbol, input, resolution.market, isDebug);
+      
+      // If Yahoo fails or returns 0/undefined for HK, try Sina HK Fallback
+      if ((!yahooResult || !yahooResult.regularMarketPrice) && resolution.market === 'HK-Share') {
+        logDebug('HK_FALLBACK', `Yahoo returned 0 for HK stock ${resolution.symbol}. Attempting Sina fallback...`);
+        const hkFallback = await fetchHKSpotFallbackFromSina(resolution.symbol);
+        if (hkFallback && hkFallback.regularMarketPrice > 0) {
+          logDebug('HK_FALLBACK', `Sina fallback SUCCEEDED for ${resolution.symbol}: ${hkFallback.regularMarketPrice}`);
+          result = hkFallback;
+          source = hkFallback.source;
+        } else {
+          logError('HK_FALLBACK', `Sina fallback FAILED or price still 0 for ${resolution.symbol}`);
+        }
+      } else if (yahooResult) {
+        result = yahooResult;
+        if (isDebug) logDebug('REALTIME', `Resolved ${resolution.symbol} via Yahoo: ${result.regularMarketPrice}`);
+      }
+
+      if (result) {
+        // Fetch indicators for result (could be Yahoo or Sina HK) if not already fetched
+        if (!indicators) {
+           try {
+              // Indicators still best fetched via Yahoo Chart or similar
+              const symWithSuffix = appendMarketSuffix(resolution.symbol, resolution.market);
+              const now = new Date();
+              const startDate = new Date();
+              startDate.setDate(now.getDate() - 120); 
+              
+              const historyRes = await yahooFinance.chart(symWithSuffix, { 
+                period1: startDate, 
+                interval: '1d' 
+              });
+
+              if (historyRes?.quotes && historyRes.quotes.length > 0) {
+                const prices = historyRes.quotes.map((q: any) => q.close).filter((p: any) => p != null);
+                const volumes = historyRes.quotes.map((q: any) => q.volume).filter((v: any) => v != null);
+                const highs = historyRes.quotes.map((q: any) => q.high).filter((h: any) => h != null);
+                const lows = historyRes.quotes.map((q: any) => q.low).filter((l: any) => l != null);
+
+                indicators = calcIndicators(prices, volumes, highs, lows, { roundVolume: true });
+              }
+           } catch {}
+        }
+      }
+    }
+
+    if (!result) {
+      return res.status(404).json({ error: `无法找到代码 "${symbol}" 的相关数据。` });
+    }
+
+    const formatted = formatQuoteResult(result);
+    if (source === 'AkShare (Local Python API)') {
+      formatted.source = source;
+    }
+
+    res.json({
+      ...formatted,
+      resolvedMarket: resolution.market,
+      technicalIndicators: indicators
+    });
+  } catch (error) {
+    logError(error, 'realtime_total_error');
+    res.status(500).json({ error: 'Failed' });
+  }
+});
+
+// --- Helpers ---
+
+async function resolveSymbolEx(input: string, preferredMarket: string, isDebug: boolean): Promise<{ symbol: string; market: string }> {
+  const upperInput = input.toUpperCase();
+  
+  const CROSS_MAPPING: Record<string, { symbol: string, market: string }> = {
+    'BABA': { symbol: '9988', market: 'HK-Share' },
+    'TCEHY': { symbol: '700', market: 'HK-Share' },
+    'JD': { symbol: '9618', market: 'HK-Share' },
+    'MEITUAN': { symbol: '3690', market: 'HK-Share' },
+    'TENCENT': { symbol: '700', market: 'HK-Share' },
+    'PPMT': { symbol: '9992', market: 'HK-Share' },
+  };
+
+  if (CROSS_MAPPING[upperInput]) return CROSS_MAPPING[upperInput];
+
+  try {
+    const encodedInput = encodeURIComponent(input);
+    const emResponse = await fetch(`https://suggest.eastmoney.com/suggest/default.aspx?name=cb&input=${encodedInput}`);
+    const emText = await emResponse.text();
+    const emMatch = emText.match(/^var cb = (\[.*\]);?$/);
+    if (emMatch?.[1]) {
+      const data = JSON.parse(emMatch[1]);
+      if (Array.isArray(data) && data.length > 0) {
+        let bestMatch = null;
+        for (const item of data) {
+          const parts = item.split(',');
+          if (parts.length >= 7) {
+            const code = parts[1];
+            const emMarketName = parts[6];
+            let marketId = '';
+            if (['SH', 'SZ', 'BJ'].includes(emMarketName)) marketId = 'A-Share';
+            else if (emMarketName === 'HK') marketId = 'HK-Share';
+            else if (emMarketName === 'US') marketId = 'US-Share';
+            if (marketId) {
+              if (marketId === preferredMarket) return { symbol: code, market: marketId };
+              if (!bestMatch) bestMatch = { symbol: code, market: marketId };
+            }
+          }
+        }
+        if (bestMatch) return bestMatch;
+      }
+    }
+  } catch {}
+
+  let resolvedSym = upperInput;
+  let resolvedMarket = preferredMarket;
+  if (/^\d{6}$/.test(upperInput)) resolvedMarket = 'A-Share';
+  else if (/^\d{1,5}$/.test(upperInput)) resolvedMarket = 'HK-Share';
+  else if (/^[A-Z]{1,5}$/.test(upperInput)) resolvedMarket = 'US-Share';
+
+  return { symbol: resolvedSym, market: resolvedMarket };
+}
+
+async function tryQuoteEx(yfSymbol: string, input: string, market: string, isDebug: boolean): Promise<any> {
+    const symWithSuffix = appendMarketSuffix(yfSymbol, market);
+    try {
+        const result = await yahooFinance.quote(symWithSuffix);
+        if (result) return result;
+    } catch {}
+
+    try {
+        const search = await yahooFinance.search(input);
+        if (search?.quotes?.length) {
+            return await yahooFinance.quote(search.quotes[0].symbol as any);
+        }
+    } catch {}
+    
+    return null;
+}
+
+function appendMarketSuffix(symbol: string, market: string): string {
+  if (symbol.includes('.') || symbol.startsWith('^')) return symbol;
+  if (market === 'A-Share' && /^\d{6}$/.test(symbol)) {
+    if (symbol.startsWith('60') || symbol.startsWith('68')) return `${symbol}.SS`;
+    if (symbol.startsWith('00') || symbol.startsWith('30')) return `${symbol}.SZ`;
+    if (symbol.startsWith('43') || symbol.startsWith('83') || symbol.startsWith('87')) return `${symbol}.BJ`;
+    return `${symbol.startsWith('6') ? symbol + '.SS' : symbol + '.SZ'}`;
+  }
+  if (market === 'HK-Share' && /^\d+$/.test(symbol)) return `${symbol.padStart(5, '0')}.HK`;
+  return symbol;
+}
+
+function formatQuoteResult(result: any) {
+  let changePercent = result.regularMarketChangePercent;
+  let change = result.regularMarketChange;
+  const price = result.regularMarketPrice;
+  const prevClose = result.regularMarketPreviousClose;
+
+  if (change === undefined && price !== undefined && prevClose !== undefined) {
+    change = price - prevClose;
+  }
+  if (changePercent === undefined && change !== undefined && prevClose !== undefined && prevClose !== 0) {
+    changePercent = (change / prevClose) * 100;
+  }
+  
+  const dataTime = result.regularMarketTime ? new Date(result.regularMarketTime) : new Date();
+  const formattedTime = dataTime.toLocaleString('zh-CN', {
+    timeZone: 'Asia/Shanghai',
+    year: 'numeric', month: '2-digit', day: '2-digit',
+    hour: '2-digit', minute: '2-digit', second: '2-digit'
+  }) + ' CST';
+
+  let marketCap = result.marketCap;
+  if (!marketCap && result.sharesOutstanding && price) {
+    marketCap = result.sharesOutstanding * price;
+  }
+
+  return {
+    symbol: result.symbol,
+    name: result.shortName || result.longName || result.symbol,
+    price,
+    change: change !== undefined ? parseFloat(change.toFixed(2)) : 0,
+    changePercent: changePercent !== undefined ? parseFloat(changePercent.toFixed(2)) : 0,
+    previousClose: prevClose,
+    open: result.regularMarketOpen,
+    dayHigh: result.regularMarketDayHigh,
+    dayLow: result.regularMarketDayLow,
+    volume: result.regularMarketVolume,
+    marketCap,
+    pe: result.trailingPE || result.forwardPE,
+    peForward: result.forwardPE,
+    pb: result.priceToBook,
+    eps: result.trailingEps || result.forwardEps,
+    epsForward: result.forwardEps,
+    dividendYield: result.dividendYield || result.trailingAnnualDividendYield,
+    roe: result.returnOnEquity,
+    revenueGrowth: result.revenueGrowth,
+    debtToEquity: result.debtToEquity,
+    currency: result.currency,
+    lastUpdated: formattedTime,
+    source: 'Yahoo Finance API',
+    exchange: result.fullExchangeName || result.exchange,
+    marketState: result.marketState,
+    quoteDelay: result.exchangeDataDelayedBy || 0
+  };
+}
+
+export default router;
