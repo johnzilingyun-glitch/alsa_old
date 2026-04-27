@@ -1,0 +1,29 @@
+rules_version = '2';
+service cloud.firestore {
+  match /databases/{database}/documents {
+    match /{document=**} {
+      allow read, write: if false;
+    }
+    
+    function isValidId(id) { return id is string && id.size() <= 128 && id.matches('^[a-zA-Z0-9_\\-]+$'); }
+    function incoming() { return request.resource.data; }
+    function existing() { return resource.data; }
+    
+    function isValidHistoryItem(data) {
+      return data.keys().hasAll(['id', 'type', 'generatedAt', 'dataStr']) &&
+             data.keys().size() == 4 &&
+             data.id is string && data.id.size() <= 200 &&
+             data.type is string && (data.type == 'market' || data.type == 'stock') &&
+             data.generatedAt is number &&
+             data.dataStr is string && data.dataStr.size() <= 1048576;
+    }
+
+    match /history/{historyId} {
+      allow get: if isValidId(historyId);
+      allow list: if resource.data.type == 'market' || resource.data.type == 'stock';
+      allow create: if isValidId(historyId) && isValidHistoryItem(incoming());
+      allow update: if isValidId(historyId) && isValidHistoryItem(incoming()) && incoming().diff(existing()).affectedKeys().hasOnly(['dataStr', 'generatedAt']);
+      allow delete: if false;
+    }
+  }
+}

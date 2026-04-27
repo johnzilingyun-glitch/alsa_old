@@ -1,0 +1,22 @@
+{
+  "entities": {
+    "HistoryItem": {
+      "title": "HistoryItem",
+      "description": "A saved market or stock analysis result",
+      "type": "object",
+      "properties": {
+        "id": { "type": "string" },
+        "type": { "type": "string", "enum": ["market", "stock"] },
+        "generatedAt": { "type": "number" },
+        "dataStr": { "type": "string", "description": "JSON stringified analysis data" }
+      },
+      "required": ["id", "type", "generatedAt", "dataStr"]
+    }
+  },
+  "firestore": {
+    "history": {
+      "schema": "HistoryItem",
+      "description": "Stores history of analyses"
+    }
+  }
+}

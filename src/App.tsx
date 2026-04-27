@@ -22,6 +22,8 @@ import { answerDiscussionQuestion, generateNewConclusion } from './services/disc
 import { getHistoryContext, getOptimizationLogs } from './services/adminService';
 import { generateHtmlReport } from './utils/reportGenerator';
 import { AgentDiscussion } from './types';
+import { useI18nSync } from './hooks/useI18nSync';
+import { useTranslation } from 'react-i18next';
 
 const AdminPanel = lazy(() => import('./components/admin/AdminPanel').then(m => ({ default: m.AdminPanel })));
 
@@ -50,6 +52,16 @@ export default function App() {
   const { 
     setDiscussionMessages, setDiscussionResults, resetDiscussion, setRoundProgress 
   } = useDiscussionStore();
+
+  useI18nSync(); // Automatically translate analysis data on language switch
+  const { i18n } = useTranslation();
+
+  // Ensure i18n language matches store language on mount
+  useEffect(() => {
+    if (i18n.language !== language) {
+      i18n.changeLanguage(language);
+    }
+  }, [language, i18n]);
 
   const handleFetchMarketOverview = useCallback(async (force = false) => {
     try {

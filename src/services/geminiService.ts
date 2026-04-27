@@ -234,14 +234,10 @@ export async function generateAndParseJsonWithRetry<T>(
   }
 
   for (const model of modelsToTry) {
-    // If 2+ consecutive models hit quota, the entire API key is exhausted — skip remaining
-    if (consecutiveQuotaErrors >= 2) {
-      console.warn(`[ModelFallback] Skipping ${model} — API key quota exhausted (${consecutiveQuotaErrors} consecutive 429s)`);
-      lastError = lastError || new QuotaError('API key quota exhausted');
-      continue;
-    }
-
-    // Wait between model switches so RPM window clears (only after a previous model failed)
+    // We removed the 'consecutiveQuotaErrors >= 2' abort here. 
+    // Even if one model hits quota, another model (e.g. flash) might still have its own free tier quota.
+    
+    // Wait between model switches so RPM window clears
     if (consecutiveQuotaErrors > 0) {
       const jitterMs = 3000 + Math.random() * 4000;
       console.warn(`[ModelFallback] Switching to ${model} — waiting ${Math.round(jitterMs/1000)}s for RPM window to clear...`);
@@ -503,7 +499,6 @@ export async function withRetry<T>(
       
       if (isQuota && isPermanentQuota) {
         console.error(`[QuotaExhausted] Model has zero/exhausted/depleted daily quota (no retry). Error: ${errorStr.substring(0, 200)}`);
-        useUIStore.getState().setServiceStatus('quota_exhausted');
         remoteLog('quota_permanent', { error: errorStr, attempt, status: error?.status }, true);
         throw new QuotaError(errorStr);
       }
