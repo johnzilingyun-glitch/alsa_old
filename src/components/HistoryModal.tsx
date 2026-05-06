@@ -187,9 +187,14 @@ export function HistoryModal({ isOpen, onClose, onSelect }: HistoryModalProps) {
                           </h4>
                           <div className="flex items-center gap-2 mt-0.5">
                             <span className="font-mono text-[10px] font-bold text-zinc-400 group-hover:text-zinc-500 transition-colors">{subtitle}</span>
+                            {(item.discussion?.length > 0 || item.messages?.length > 0) && (
+                              <span className="px-1.5 py-0.5 rounded-md bg-emerald-50 text-[8px] font-black uppercase text-emerald-600 tracking-tighter">
+                                多轮研判
+                              </span>
+                            )}
                             {item.chatHistory && item.chatHistory.length > 0 && (
                               <span className="px-1.5 py-0.5 rounded-md bg-indigo-50 text-[8px] font-black uppercase text-indigo-600 tracking-tighter">
-                                已沉淀对话
+                                对话记录
                               </span>
                             )}
                           </div>

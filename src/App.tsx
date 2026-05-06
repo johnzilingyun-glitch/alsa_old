@@ -81,9 +81,14 @@ export default function App() {
     handleFetchMarketOverview();
   }, [handleFetchMarketOverview]);
 
-  const handleSearch = async (e?: React.FormEvent) => {
+  const handleSearch = async (e?: React.FormEvent, explicitSymbol?: string) => {
     if (e) e.preventDefault();
-    if (!symbol) return;
+    const query = (explicitSymbol || symbol || '').trim();
+    if (!query) return;
+
+    if (explicitSymbol && explicitSymbol !== symbol) {
+      useAnalysisStore.getState().setSymbol(explicitSymbol);
+    }
 
     try {
       setLoading(true);
@@ -91,7 +96,7 @@ export default function App() {
       resetDiscussion();
       
       const result = await analyzeStock(
-        symbol, 
+        query, 
         market, 
         config || geminiConfig,
         (status) => setAnalysisStatus(status)
@@ -328,8 +333,10 @@ export default function App() {
                 industryAnchors: item.industryAnchors,
                 dataVerification: item.dataVerification,
               } as any);
+              setShowDiscussion(true);
             } else {
               resetDiscussion();
+              setShowDiscussion(false);
             }
 
             // Restore follow-up chat history

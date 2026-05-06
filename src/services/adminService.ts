@@ -21,7 +21,11 @@ export async function getOptimizationLogs(): Promise<any[]> {
 
 export async function getHistoryContext(): Promise<any[]> {
   try {
-    const q = query(collection(db, 'history'), orderBy('generatedAt', 'desc'), limit(100));
+    const q = query(
+      collection(db, 'history'),
+      orderBy('generatedAt', 'desc'),
+      limit(100)
+    );
     const querySnapshot = await getDocs(q);
     const history: any[] = [];
     querySnapshot.forEach((docSnap) => {
@@ -43,13 +47,14 @@ export async function getMarketHistoryByDate(date: string, market: string): Prom
   try {
     const q = query(
       collection(db, 'history'), 
-      where('type', '==', 'market'),
       orderBy('generatedAt', 'desc'),
-      limit(50) // fetch recent and filter in-memory since date parsing is custom
+      limit(200)
     );
     const snap = await getDocs(q);
-    for (const docSnap of snap.docs) {
-      const parsed = JSON.parse(docSnap.data().dataStr);
+    const docs = snap.docs.map(d => JSON.parse(d.data().dataStr));
+
+    for (const parsed of docs) {
+      if (parsed.type !== 'market') continue;
       if (parsed.market && parsed.market.toLowerCase() !== market.toLowerCase()) continue;
       
       const genDate = new Date(parsed.generatedAt);
@@ -66,12 +71,14 @@ export async function getMarketHistoryByDate(date: string, market: string): Prom
 
 export async function getAvailableMarketDates(market: string): Promise<string[]> {
   try {
-    const q = query(collection(db, 'history'), where('type', '==', 'market'), orderBy('generatedAt', 'desc'));
+    const q = query(collection(db, 'history'), orderBy('generatedAt', 'desc'), limit(500));
     const snap = await getDocs(q);
     const dates = new Set<string>();
-    snap.forEach((docSnap) => {
+    const docs = snap.docs.map(d => JSON.parse(d.data().dataStr));
+
+    docs.forEach((parsed) => {
       try {
-        const parsed = JSON.parse(docSnap.data().dataStr);
+        if (parsed.type !== 'market') return;
         if (parsed.market && parsed.market.toLowerCase() !== market.toLowerCase()) return;
         const genDate = new Date(parsed.generatedAt);
         if (!isNaN(genDate.getTime())) {
@@ -79,7 +86,7 @@ export async function getAvailableMarketDates(market: string): Promise<string[]>
         }
       } catch {}
     });
-    return [...dates].sort().reverse();
+    return [...dates];
   } catch (err) {
     console.warn('Failed to fetch available market dates:', err);
     return [];
@@ -112,7 +119,7 @@ export async function getPreviousStockAnalysis(symbol: string): Promise<any | nu
 export async function saveAnalysisToHistory(type: 'market' | 'stock', data: any) {
   try {
     const now = Date.now();
-    const id = `${type}-${now}-${Math.random().toString(36).substr(2, 9)}`;
+    const id = data.id || `${type}-${now}-${Math.random().toString(36).substr(2, 9)}`;
     const dataToSave = { 
       ...data, 
       id, 
@@ -120,16 +127,28 @@ export async function saveAnalysisToHistory(type: 'market' | 'stock', data: any)
       generatedAt: data.generatedAt || now 
     };
     
+    const dataStr = JSON.stringify(dataToSave);
+    if (dataStr.length > 1000000) {
+      console.warn('History data exceeds 1MB limit. Pruning discussion history.');
+      dataToSave.discussion = undefined;
+      dataToSave.messages = undefined;
+      // Optional: keep last N messages or just remove it
+    }
+    
+    const finalStr = JSON.stringify(dataToSave);
+
     await setDoc(doc(db, 'history', id), {
       id,
       type,
       generatedAt: dataToSave.generatedAt,
-      dataStr: JSON.stringify(dataToSave)
+      dataStr: finalStr
     });
+    console.log(`Saved history item ${id} successfully. Size: ${finalStr.length} chars.`);
   } catch (err) {
     console.warn('Failed to save analysis to history:', err);
   }
 }
+
 
 export async function logOptimization(field: string, oldValue: any, newValue: any, description: string) {
   try {

@@ -1,6 +1,6 @@
 {
-  "name": "",
-  "description": "",
+  "name": "alsa_old",
+  "description": "串行 分析",
   "requestFramePermissions": [],
   "majorCapabilities": []
 }

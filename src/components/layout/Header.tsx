@@ -10,7 +10,7 @@ import { useAnalysisStore } from '../../stores/useAnalysisStore';
 import { useConfigStore } from '../../stores/useConfigStore';
 
 interface HeaderProps {
-  onSearch: (e: React.FormEvent) => void;
+  onSearch: (e?: React.FormEvent, explicitSymbol?: string) => void;
   onResetToHome: () => void;
   onTriggerDailyReport: () => void;
   onOpenHistory: () => void;
@@ -50,7 +50,7 @@ export const Header = memo(function Header({ onSearch, onResetToHome, onTriggerD
 
     const fetchSuggestions = async () => {
       const trimmed = localSymbol.trim();
-      if (!trimmed || trimmed.length < 1 || isComposing.current) {
+      if (!trimmed || trimmed.length < 1) {
         setSuggestions([]);
         setShowSuggestions(false);
         return;
@@ -298,7 +298,7 @@ export const Header = memo(function Header({ onSearch, onResetToHome, onTriggerD
 
       {/* Search Bar Container */}
       <div className="mt-12 flex flex-col gap-3">
-        <form onSubmit={onSearch} className="flex flex-col gap-4 sm:flex-row items-stretch relative" ref={searchContainerRef}>
+        <form onSubmit={(e) => onSearch(e, localSymbol)} className="flex flex-col gap-4 sm:flex-row items-stretch relative" ref={searchContainerRef}>
         <div className="relative group flex-shrink-0">
           <select
             value={market}
@@ -332,6 +332,7 @@ export const Header = memo(function Header({ onSearch, onResetToHome, onTriggerD
               isComposing.current = false;
               const val = e.currentTarget.value;
               setLocalSymbol(val);
+              setSymbol(val);
               // Store as is for suggestions, will uppercase on submit
             }}
             onChange={(e) => {

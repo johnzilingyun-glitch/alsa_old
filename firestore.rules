@@ -20,7 +20,7 @@ service cloud.firestore {
 
     match /history/{historyId} {
       allow get: if isValidId(historyId);
-      allow list: if resource.data.type == 'market' || resource.data.type == 'stock';
+      allow list: if true;
       allow create: if isValidId(historyId) && isValidHistoryItem(incoming());
       allow update: if isValidId(historyId) && isValidHistoryItem(incoming()) && incoming().diff(existing()).affectedKeys().hasOnly(['dataStr', 'generatedAt']);
       allow delete: if false;
