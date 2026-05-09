@@ -428,7 +428,7 @@ export async function startMultiRoundDiscussion(
                 message: {
                   id: `msg-${Date.now()}-${Math.random().toString(36).slice(2, 11)}`,
                   role: expertRole,
-                  content: `🚨 **[紧急告警] API 限额/欠费导致研讨强行终止**\n\n因当前 API Key 的配额度（可能为免费额度耗尽或付费账户欠费）已被完全消耗，模型引擎拒绝服务，系统强制中止并降级分析会话。\n\n请前往设置检查 API Key 或等待次日配额刷新。系统已强行抢救并尝试保留截止至目前的断点分析记录。`,
+                  content: `🚨 **[API 额度受限] 模型访问终止**\n\n因当前所在配额（可能为免费额度耗尽或付费账户欠费）已被完全消耗，模型引擎暂时拒绝请求。系统中止讨论，尝试为您保留中断前的部分结论。\n\n💡 建议：请前往设置中检查 API Key，或等待额度重置。`,
                   timestamp: new Date().toISOString(),
                   type: 'discussion',
                   round: roundNum,
@@ -518,7 +518,7 @@ export async function startMultiRoundDiscussion(
               message: {
                 id: `msg-${Date.now()}-${Math.random().toString(36).slice(2, 11)}`,
                 role: round.experts[i],
-                content: `🚨 **[紧急告警] API 限额/欠费导致研讨强行终止**\n\n因当前 API Key 的配额度（可能为免费额度耗尽或付费账户欠费）已被完全消耗，模型引擎拒绝服务，系统强制中止并降级分析会话。\n\n请前往设置检查 API Key 或等待次日配额刷新。系统已强行抢救并尝试保留截止至目前的断点分析记录。`,
+                content: `🚨 **[API 额度受限] 模型访问终止**\n\n因当前所在配额（可能为免费额度耗尽或付费账户欠费）已被完全消耗，模型引擎暂时拒绝请求。系统中止讨论，尝试为您保留中断前的部分结论。\n\n💡 建议：请前往设置中检查 API Key，或等待额度重置。`,
                 timestamp: new Date().toISOString(),
                 type: 'discussion',
                 round: roundNum,

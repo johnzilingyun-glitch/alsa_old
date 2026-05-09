@@ -1,4 +1,5 @@
 import { create } from 'zustand';
+import { persist } from 'zustand/middleware';
 import { AgentMessage, TradingPlanVersion, AnalystWeight, AgentDiscussion } from '../types';
 
 interface DiscussionState {
@@ -41,38 +42,49 @@ const initialState = {
   lastReasoning: undefined,
 };
 
-export const useDiscussionStore = create<DiscussionState>((set, get) => ({
-  ...initialState,
+export const useDiscussionStore = create<DiscussionState>()(
+  persist(
+    (set, get) => ({
+      ...initialState,
 
-  setDiscussionMessages: (updater) => set((state) => ({
-    discussionMessages: typeof updater === 'function' ? updater(state.discussionMessages) : updater,
-  })),
-  setControversialPoints: (controversialPoints) => set({ controversialPoints }),
-  setTradingPlanHistory: (updater) => set((state) => ({
-    tradingPlanHistory: typeof updater === 'function' ? updater(state.tradingPlanHistory) : updater,
-  })),
-  setAnalystWeights: (analystWeights) => set({ analystWeights }),
-  setDiscussionResults: (discussion) => set({
-    discussionMessages: discussion.messages,
-    controversialPoints: discussion.controversialPoints || [],
-    tradingPlanHistory: discussion.tradingPlanHistory || [],
-    analystWeights: discussion.analystWeights || [],
-    expectedValueOutcome: discussion.expectedValueOutcome || null,
-    sensitivityMatrix: discussion.sensitivityMatrix || null,
-  }),
-  setRoundProgress: (currentRound, totalRounds, activeExperts, currentStep, lastReasoning) => 
-    set({ currentRound, totalRounds, activeExperts: activeExperts || [], currentStep, lastReasoning }),
-  setAbortController: (abortController) => set({ abortController }),
-  abortDiscussion: () => {
-    const { abortController } = get();
-    if (abortController) {
-      abortController.abort();
-      set({ abortController: null });
+      setDiscussionMessages: (updater) => set((state) => ({
+        discussionMessages: typeof updater === 'function' ? updater(state.discussionMessages) : updater,
+      })),
+      setControversialPoints: (controversialPoints) => set({ controversialPoints }),
+      setTradingPlanHistory: (updater) => set((state) => ({
+        tradingPlanHistory: typeof updater === 'function' ? updater(state.tradingPlanHistory) : updater,
+      })),
+      setAnalystWeights: (analystWeights) => set({ analystWeights }),
+      setDiscussionResults: (discussion) => set({
+        discussionMessages: discussion.messages,
+        controversialPoints: discussion.controversialPoints || [],
+        tradingPlanHistory: discussion.tradingPlanHistory || [],
+        analystWeights: discussion.analystWeights || [],
+        expectedValueOutcome: discussion.expectedValueOutcome || null,
+        sensitivityMatrix: discussion.sensitivityMatrix || null,
+      }),
+      setRoundProgress: (currentRound, totalRounds, activeExperts, currentStep, lastReasoning) => 
+        set({ currentRound, totalRounds, activeExperts: activeExperts || [], currentStep, lastReasoning }),
+      setAbortController: (abortController) => set({ abortController }),
+      abortDiscussion: () => {
+        const { abortController } = get();
+        if (abortController) {
+          abortController.abort();
+          set({ abortController: null });
+        }
+      },
+      resetDiscussion: () => {
+        const { abortController } = get();
+        if (abortController) abortController.abort();
+        set(initialState);
+      },
+    }),
+    {
+      name: 'discussion-storage',
+      partialize: (state) => {
+        const { abortController, ...rest } = state;
+        return rest;
+      },
     }
-  },
-  resetDiscussion: () => {
-    const { abortController } = get();
-    if (abortController) abortController.abort();
-    set(initialState);
-  },
-}));
+  )
+);

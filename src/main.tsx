@@ -5,7 +5,7 @@ import './i18n';
 import App from './App.tsx';
 import './index.css';
 
-function fallbackRender({ error }: { error: Error }) {
+function fallbackRender({ error }: { error: any }) {
   return (
     <div role="alert" style={{ padding: 20 }}>
       <p>Something went wrong:</p>

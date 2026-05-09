@@ -43,6 +43,7 @@ export function HistoryModal({ isOpen, onClose, onSelect }: HistoryModalProps) {
   }, [isOpen, loadHistory]);
 
   const filteredHistory = history.filter(item => {
+    if (!searchTerm) return true;
     const searchLower = searchTerm.toLowerCase();
     
     // Stock match

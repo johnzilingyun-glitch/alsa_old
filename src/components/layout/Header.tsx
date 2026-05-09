@@ -80,7 +80,7 @@ export const Header = memo(function Header({ onSearch, onResetToHome, onTriggerD
             setShowSuggestions(data.length > 0);
             setSelectedIndex(-1);
           } else {
-            console.error('Failed to fetch suggestions: Expected JSON, got', contentType);
+            // Silently ignore non-JSON responses (e.g. proxy HTML errors or timeouts)
             setShowSuggestions(false);
           }
         }

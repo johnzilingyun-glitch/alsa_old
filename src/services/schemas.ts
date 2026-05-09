@@ -126,7 +126,15 @@ export const MarketOverviewSchema = z.object({
  * Uses .catch() defaults so partial data doesn't block rendering.
  */
 export function validateResponse<T>(schema: z.ZodSchema<T>, data: unknown, label: string): T {
-  const result = schema.safeParse(data);
+  let result = schema.safeParse(data);
+  
+  if (!result.success && Array.isArray(data) && data.length > 0 && typeof data[0] === 'object') {
+    const arrayResult = schema.safeParse(data[0]);
+    if (arrayResult.success) {
+      result = arrayResult;
+    }
+  }
+
   if (result.success) {
     return result.data;
   }

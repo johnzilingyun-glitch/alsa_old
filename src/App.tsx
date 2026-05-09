@@ -152,7 +152,19 @@ export default function App() {
         }
       }
     } catch (err: any) {
-      const msg = err.message || 'Analysis failed';
+      const originalMsg = err.message || 'Analysis failed';
+      let msg = originalMsg;
+      if (originalMsg.includes('QuotaExhausted') && originalMsg.includes('{')) {
+        try {
+          const jsonStrMatch = originalMsg.match(/(\{.*\})/);
+          if (jsonStrMatch) {
+            const parsed = JSON.parse(jsonStrMatch[1]);
+            msg = parsed?.error?.message || originalMsg;
+          }
+        } catch (e) {
+          // ignore
+        }
+      }
       setAnalysisError(msg);
       if (msg.toLowerCase().includes('quota') || msg.includes('429') || msg.includes('RESOURCE_EXHAUSTED')) {
         setServiceStatus('quota_exhausted');

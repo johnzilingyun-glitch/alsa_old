@@ -1,4 +1,5 @@
 import { create } from 'zustand';
+import { persist } from 'zustand/middleware';
 import { Market, StockAnalysis } from '../types';
 
 interface AnalysisState {
@@ -16,20 +17,27 @@ interface AnalysisState {
   resetAnalysis: () => void;
 }
 
-export const useAnalysisStore = create<AnalysisState>((set) => ({
-  symbol: '',
-  market: 'A-Share',
-  analysis: null,
-  chatMessage: '',
-  chatHistory: [],
+export const useAnalysisStore = create<AnalysisState>()(
+  persist(
+    (set) => ({
+      symbol: '',
+      market: 'A-Share',
+      analysis: null,
+      chatMessage: '',
+      chatHistory: [],
 
-  setSymbol: (symbol) => set({ symbol }),
-  setMarket: (market) => set({ market }),
-  setAnalysis: (updater) => set((state) => ({ analysis: typeof updater === 'function' ? updater(state.analysis) : updater })),
-  setChatMessage: (chatMessage) => set({ chatMessage }),
-  setChatHistory: (updater) => set((state) => ({ chatHistory: typeof updater === 'function' ? updater(state.chatHistory) : updater })),
-  resetAnalysis: () => set({
-    analysis: null,
-    chatHistory: [],
-  }),
-}));
+      setSymbol: (symbol) => set({ symbol }),
+      setMarket: (market) => set({ market }),
+      setAnalysis: (updater) => set((state) => ({ analysis: typeof updater === 'function' ? updater(state.analysis) : updater })),
+      setChatMessage: (chatMessage) => set({ chatMessage }),
+      setChatHistory: (updater) => set((state) => ({ chatHistory: typeof updater === 'function' ? updater(state.chatHistory) : updater })),
+      resetAnalysis: () => set({
+        analysis: null,
+        chatHistory: [],
+      }),
+    }),
+    {
+      name: 'analysis-storage',
+    }
+  )
+);

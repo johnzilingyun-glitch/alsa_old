@@ -498,9 +498,8 @@ export async function withRetry<T>(
                                errorStr.toLowerCase().includes('depleted');
       
       if (isQuota && isPermanentQuota) {
-        console.error(`[QuotaExhausted] Model has zero/exhausted/depleted daily quota (no retry). Error: ${errorStr.substring(0, 200)}`);
         remoteLog('quota_permanent', { error: errorStr, attempt, status: error?.status }, true);
-        throw new QuotaError(errorStr);
+        throw new QuotaError(`API Quota Exhausted: Please check your billing details.`);
       }
 
       if (isQuota && attempt < maxRetries) {
@@ -510,11 +509,10 @@ export async function withRetry<T>(
         continue;
       }
 
-      // If 429 on final attempt, it's persistent — bail to fallback chain
+      // If 429 on final attempt, it's persistent - bail to fallback chain
       if (isQuota) {
-        console.error(`[QuotaExhausted] Persistent 429 after ${attempt} attempts. Error: ${errorStr.substring(0, 200)}`);
         remoteLog('quota_exhausted_failure', { error: errorStr, attempt, status: error?.status }, true);
-        throw new QuotaError(errorStr);
+        throw new QuotaError(`API Quota Exhausted (429 Rate Limit)`);
       }
 
       // Transient errors: retry with exponential backoff
