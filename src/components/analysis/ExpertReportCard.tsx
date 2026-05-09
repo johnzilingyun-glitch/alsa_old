@@ -2,6 +2,7 @@ import React from 'react';
 import { motion } from 'motion/react';
 import ReactMarkdown from 'react-markdown';
 import remarkGfm from 'remark-gfm';
+import rehypeRaw from 'rehype-raw';
 import { 
   Shield, ShieldCheck, ShieldAlert, Award, TrendingUp, Target, 
   Search, AlertTriangle, Calculator, BarChart3, Database, ExternalLink 
@@ -199,7 +200,19 @@ export function ExpertReportCard({
                       </div>
                       <div className="p-6 rounded-[2rem] bg-indigo-50/50 border border-indigo-100 flex items-center justify-center">
                         <div className="prose prose-sm prose-indigo italic text-indigo-900/60 font-medium">
-                          <ReactMarkdown remarkPlugins={[remarkGfm]}>{section.content}</ReactMarkdown>
+                          <ReactMarkdown 
+                            remarkPlugins={[remarkGfm]} 
+                            rehypePlugins={[rehypeRaw]}
+                            components={{
+                              table: ({node, ...props}) => (
+                                <div className="w-full overflow-x-auto my-4 rounded-xl border border-indigo-100 shadow-sm">
+                                  <table className="w-full text-left border-collapse min-w-max" {...props} />
+                                </div>
+                              )
+                            }}
+                          >
+                            {section.content}
+                          </ReactMarkdown>
                         </div>
                       </div>
                     </div>
@@ -221,7 +234,19 @@ export function ExpertReportCard({
                            );
                          })()}
                          <div className="prose prose-sm prose-rose max-w-none text-rose-900/70">
-                            <ReactMarkdown remarkPlugins={[remarkGfm]}>{section.content.replace(/(\d+)\/100/, '')}</ReactMarkdown>
+                            <ReactMarkdown 
+                              remarkPlugins={[remarkGfm]} 
+                              rehypePlugins={[rehypeRaw]}
+                              components={{
+                                table: ({node, ...props}) => (
+                                  <div className="w-full overflow-x-auto my-4 rounded-xl border border-rose-100 shadow-sm">
+                                    <table className="w-full text-left border-collapse min-w-max" {...props} />
+                                  </div>
+                                )
+                              }}
+                            >
+                              {section.content.replace(/(\d+)\/100/, '')}
+                            </ReactMarkdown>
                          </div>
                        </div>
                     </div>
@@ -258,7 +283,23 @@ export function ExpertReportCard({
                       // Inline Code
                       "prose-code:text-[13px] prose-code:font-mono prose-code:bg-zinc-100 prose-code:px-1.5 prose-code:py-0.5 prose-code:rounded-md prose-code:text-zinc-800 before:prose-code:content-none after:prose-code:content-none"
                     )}>
-                      <ReactMarkdown remarkPlugins={[remarkGfm]}>{section.content}</ReactMarkdown>
+                      <ReactMarkdown 
+                        remarkPlugins={[remarkGfm]} 
+                        rehypePlugins={[rehypeRaw]}
+                        components={{
+                          table: ({node, ...props}) => (
+                            <div className="my-8 overflow-x-auto w-full rounded-2xl border border-zinc-200 bg-white shadow-sm">
+                              <table className="w-full text-left border-collapse min-w-max" {...props} />
+                            </div>
+                          ),
+                          thead: ({node, ...props}) => <thead className="bg-zinc-50 border-b border-zinc-200" {...props} />,
+                          th: ({node, ...props}) => <th className="px-5 py-4 text-xs font-bold text-zinc-600 uppercase tracking-wider" {...props} />,
+                          td: ({node, ...props}) => <td className="px-5 py-4 text-[13px] text-zinc-700 border-b border-zinc-100 font-medium align-middle" {...props} />,
+                          tr: ({node, ...props}) => <tr className="hover:bg-zinc-50/50 transition-colors" {...props} />,
+                        }}
+                      >
+                        {section.content}
+                      </ReactMarkdown>
                     </div>
                   )}
                 </div>

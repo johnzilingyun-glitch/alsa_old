@@ -19,6 +19,7 @@ import { useTranslation } from 'react-i18next';
 import { clsx } from 'clsx';
 import ReactMarkdown from 'react-markdown';
 import remarkGfm from 'remark-gfm';
+import rehypeRaw from 'rehype-raw';
 import { cn } from './utils';
 import { getQualityLabel } from '../../services/dataQualityService';
 import { useUIStore, selectIsDiscussing, selectIsReviewing } from '../../stores/useUIStore';
@@ -210,6 +211,7 @@ export function ConferenceResults({ analysis, onSendDiscussionReport }: Conferen
                     <div className="prose prose-zinc max-w-none">
                       <ReactMarkdown 
                         remarkPlugins={[remarkGfm]}
+                        rehypePlugins={[rehypeRaw]}
                         components={{
                           h1: ({node, ...props}) => <h1 className="text-2xl font-bold text-zinc-900 mt-8 mb-4 flex items-center gap-2 border-l-4 border-indigo-600 pl-4" {...props} />,
                           h2: ({node, ...props}) => <h2 className="text-xl font-bold text-zinc-900 mt-6 mb-3 flex items-center gap-2" {...props} />,
@@ -1274,6 +1276,7 @@ export function ConferenceResults({ analysis, onSendDiscussionReport }: Conferen
                   <div className="prose prose-sm max-w-none pl-4 pt-1">
                     <ReactMarkdown 
                       remarkPlugins={[remarkGfm]}
+                      rehypePlugins={[rehypeRaw]}
                       components={{
                         h1: ({node, ...props}) => <h1 className="text-lg font-bold text-zinc-900 border-b border-zinc-100 pb-2 mb-4" {...props} />,
                         h2: ({node, ...props}) => <h2 className="text-base font-bold text-zinc-800 mb-3" {...props} />,
